@@ -30,25 +30,59 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Collections;
 
 public class AndroidAudioManager implements MethodCallHandler {
-    // TODO: synchronize access
     private static Singleton singleton;
+    private final BinaryMessenger messenger;
+    private final MethodChannel channel;
+    private volatile boolean isInitialized = false;
 
-    BinaryMessenger messenger;
-    MethodChannel channel;
+    public static AndroidAudioManager create(@NonNull Context applicationContext, @NonNull BinaryMessenger messenger) {
+        AndroidAudioManager manager = new AndroidAudioManager(applicationContext, messenger);
+        manager.initialize();
+        return manager;
+    }
 
-    public AndroidAudioManager(@NonNull Context applicationContext, @NonNull BinaryMessenger messenger) {
-        if (singleton == null)
-            singleton = new Singleton(applicationContext);
+    private AndroidAudioManager(@NonNull Context applicationContext, @NonNull BinaryMessenger messenger) {
         this.messenger = messenger;
-        channel = new MethodChannel(messenger, "com.ryanheise.android_audio_manager");
-        singleton.add(this);
+        this.channel = new MethodChannel(messenger, "com.ryanheise.android_audio_manager");
+        
+        // Initialize singleton if needed
+        if (singleton == null) {
+            synchronized (AndroidAudioManager.class) {
+                if (singleton == null) {
+                    singleton = new Singleton(applicationContext);
+                }
+            }
+        }
+    }
+
+    private void initialize() {
+        // Now that construction is complete, we can safely set up the handler
         channel.setMethodCallHandler(this);
+        isInitialized = true;
+        singleton.addInstance(this);
+    }
+
+    // Add a new method to check initialization status
+    boolean isFullyInitialized() {
+        return isInitialized;
+    }
+
+    MethodChannel getChannel() {
+        if (!isInitialized) {
+            throw new IllegalStateException("AndroidAudioManager not fully initialized");
+        }
+        return channel;
     }
 
     @Override
     public void onMethodCall(@NonNull final MethodCall call, @NonNull final Result result) {
+        if (!isInitialized) {
+            result.error("Error: Manager not initialized", null, null);
+            return;
+        }
         try {
             List<?> args = (List<?>)call.arguments;
             switch (call.method) {
@@ -235,16 +269,22 @@ public class AndroidAudioManager implements MethodCallHandler {
         }
     }
 
-    public void dispose() {
+     public void dispose() {
+        if (!isInitialized) {
+            return;
+        }
         channel.setMethodCallHandler(null);
         singleton.remove(this);
         if (singleton.isEmpty()) {
-            singleton.dispose();
-            singleton = null;
+            synchronized (AndroidAudioManager.class) {
+                if (singleton.isEmpty()) {
+                    singleton.dispose();
+                    singleton = null;
+                }
+            }
         }
-        channel = null;
-        messenger = null;
     }
+
 
     /**
      * To emulate iOS's AVAudioSession, we maintain a single app-wide audio
@@ -252,8 +292,10 @@ public class AndroidAudioManager implements MethodCallHandler {
      * share access to.
      */
     private static class Singleton {
+        
+        private final List<AndroidAudioManager> instances = 
+            Collections.synchronizedList(new ArrayList<>());
         private final Handler handler = new Handler(Looper.getMainLooper());
-        private List<AndroidAudioManager> instances = new ArrayList<>();
         private AudioFocusRequestCompat audioFocusRequest;
         private BroadcastReceiver noisyReceiver;
         private BroadcastReceiver scoReceiver;
@@ -270,6 +312,26 @@ public class AndroidAudioManager implements MethodCallHandler {
             }
         }
 
+        public void addInstance(AndroidAudioManager manager) {
+            if (!manager.isFullyInitialized()) {
+                throw new IllegalStateException("Cannot add uninitialized manager");
+            }
+            synchronized (instances) {
+                instances.add(manager);
+            }
+        }
+
+        public void remove(AndroidAudioManager manager) {
+            synchronized (instances) {
+                instances.remove(manager);
+            }
+        }
+
+        public boolean isEmpty() {
+            synchronized (instances) {
+                return instances.isEmpty();
+            }
+        }
         @TargetApi(23)
         private void initAudioDeviceCallback() {
             audioDeviceCallback = new AudioDeviceCallback() {
@@ -283,18 +345,6 @@ public class AndroidAudioManager implements MethodCallHandler {
                 }
             };
             audioManager.registerAudioDeviceCallback((AudioDeviceCallback)audioDeviceCallback, handler);
-        }
-
-        public void add(AndroidAudioManager manager) {
-            instances.add(manager);
-        }
-
-        public void remove(AndroidAudioManager manager) {
-            instances.remove(manager);
-        }
-
-        public boolean isEmpty() {
-            return instances.size() == 0;
         }
 
         public boolean requestAudioFocus(List<?> args) {
@@ -351,55 +401,68 @@ public class AndroidAudioManager implements MethodCallHandler {
             audioManager.dispatchMediaKeyEvent(keyEvent);
             return null;
         }
+
         @TargetApi(21)
         public Object isVolumeFixed() {
             requireApi(21);
             return audioManager.isVolumeFixed();
         }
+
         public Object adjustStreamVolume(int streamType, int direction, int flags) {
             audioManager.adjustStreamVolume(streamType, direction, flags);
             return null;
         }
+
         public Object adjustVolume(int direction, int flags) {
             audioManager.adjustVolume(direction, flags);
             return null;
         }
+
         public Object adjustSuggestedStreamVolume(int direction, int suggestedStreamType, int flags) {
             audioManager.adjustSuggestedStreamVolume(direction, suggestedStreamType, flags);
             return null;
         }
+
         public Object getRingerMode() {
             return audioManager.getRingerMode();
         }
+
         public Object getStreamMaxVolume(int streamType) {
             return audioManager.getStreamMaxVolume(streamType);
         }
+
         @TargetApi(28)
         public Object getStreamMinVolume(int streamType) {
             requireApi(28);
             return audioManager.getStreamMinVolume(streamType);
         }
+
         public Object getStreamVolume(int streamType) {
             return audioManager.getStreamVolume(streamType);
         }
+
         @TargetApi(28)
         public Object getStreamVolumeDb(int streamType, int index, int deviceType) {
             requireApi(28);
             return audioManager.getStreamVolumeDb(streamType, index, deviceType);
         }
+
         public Object setRingerMode(int ringerMode) {
             audioManager.setRingerMode(ringerMode);
             return null;
         }
+
         public Object setStreamVolume(int streamType, int index, int flags) {
             audioManager.setStreamVolume(streamType, index, flags);
             return null;
         }
+
         @TargetApi(23)
         public Object isStreamMute(int streamType) {
             requireApi(23);
             return audioManager.isStreamMute(streamType);
         }
+
         @TargetApi(31)
         public List<Map<String, Object>> getAvailableCommunicationDevices() {
             requireApi(31);
@@ -410,6 +473,7 @@ public class AndroidAudioManager implements MethodCallHandler {
             }
             return result;
         }
+
         @TargetApi(31)
         public boolean setCommunicationDevice(Integer deviceId) {
             requireApi(31);
@@ -420,87 +484,107 @@ public class AndroidAudioManager implements MethodCallHandler {
             }
             return false;
         }
+
         @TargetApi(31)
         public Map<String, Object> getCommunicationDevice() {
             requireApi(31);
             return encodeAudioDevice(audioManager.getCommunicationDevice());
         }
+
         @TargetApi(31)
         public Object clearCommunicationDevice() {
             requireApi(31);
             audioManager.clearCommunicationDevice();
             return null;
         }
+
         @SuppressWarnings("deprecation")
         public Object setSpeakerphoneOn(boolean enabled) {
             audioManager.setSpeakerphoneOn(enabled);
             return null;
         }
+
         @SuppressWarnings("deprecation")
         public Object isSpeakerphoneOn() {
             return audioManager.isSpeakerphoneOn();
         }
+
         @TargetApi(29)
         public Object setAllowedCapturePolicy(int capturePolicy) {
             requireApi(29);
             audioManager.setAllowedCapturePolicy(capturePolicy);
             return null;
         }
+
         @TargetApi(29)
         public Object getAllowedCapturePolicy() {
             requireApi(29);
             return audioManager.getAllowedCapturePolicy();
         }
+
         public Object isBluetoothScoAvailableOffCall() {
             return audioManager.isBluetoothScoAvailableOffCall();
         }
+
         @SuppressWarnings("deprecation")
         public Object startBluetoothSco() {
             audioManager.startBluetoothSco();
             return null;
         }
+
         @SuppressWarnings("deprecation")
         public Object stopBluetoothSco() {
             audioManager.stopBluetoothSco();
             return null;
         }
+
         public Object setBluetoothScoOn(boolean enabled) {
             audioManager.setBluetoothScoOn(enabled);
             return null;
         }
+
         @SuppressWarnings("deprecation")
         public Object isBluetoothScoOn() {
             return audioManager.isBluetoothScoOn();
         }
+
         public Object setMicrophoneMute(boolean enabled) {
             audioManager.setMicrophoneMute(enabled);
             return null;
         }
+
         public Object isMicrophoneMute() {
             return audioManager.isMicrophoneMute();
         }
+
         public Object setMode(int mode) {
             audioManager.setMode(mode);
             return null;
         }
+
         public Object getMode() {
             return audioManager.getMode();
         }
+
         public Object isMusicActive() {
             return audioManager.isMusicActive();
         }
+
         @TargetApi(21)
         public Object generateAudioSessionId() {
             requireApi(21);
             return audioManager.generateAudioSessionId();
         }
+
         public Object setParameters(String parameters) {
             audioManager.setParameters(parameters);
             return null;
         }
+
         public Object getParameters(String keys) {
             return audioManager.getParameters(keys);
         }
+
         public Object playSoundEffect(int effectType, Double volume) {
             if (volume != null) {
                 audioManager.playSoundEffect(effectType, (float)((double)volume));
@@ -509,17 +593,21 @@ public class AndroidAudioManager implements MethodCallHandler {
             }
             return null;
         }
+
         public Object loadSoundEffects() {
             audioManager.loadSoundEffects();
             return null;
         }
+
         public Object unloadSoundEffects() {
             audioManager.unloadSoundEffects();
             return null;
         }
+
         public Object getProperty(String arg) {
             return audioManager.getProperty(arg);
         }
+
         @TargetApi(23)
         public Object getDevices(int flags) {
             requireApi(23);
@@ -547,6 +635,7 @@ public class AndroidAudioManager implements MethodCallHandler {
             }
             return result;
         }
+
         @TargetApi(28)
         public Object getMicrophones() throws IOException {
             requireApi(28);
@@ -612,7 +701,6 @@ public class AndroidAudioManager implements MethodCallHandler {
             scoReceiver = new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
-                    // emit [onScoAudioStateUpdated] with current state [EXTRA_SCO_AUDIO_STATE] and previous state [EXTRA_SCO_AUDIO_PREVIOUS_STATE]
                     invokeMethod(
                         "onScoAudioStateUpdated",
                         intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, -1),
@@ -646,7 +734,7 @@ public class AndroidAudioManager implements MethodCallHandler {
         public void invokeMethod(String method, Object... args) {
             for (AndroidAudioManager instance : instances) {
                 ArrayList<Object> list = new ArrayList<Object>(Arrays.asList(args));
-                instance.channel.invokeMethod(method, list);
+                instance.getChannel().invokeMethod(method, list);
             }
         }
 
